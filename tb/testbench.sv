@@ -8,7 +8,7 @@
 // Checks : count, s_ready (full), m_valid (empty), data order/integrity,
 //          m_data stability under stall, almost flags, sticky errors + clear,
 //          100% throughput, mid-run reset.
-// To retarget: change DEPTH / AF_THRESH / AE_THRESH below (AF_THRESH >= 1).
+// To retarget: change DEPTH / AF_THRESH / AE_THRESH / OUT_REG below (AF_THRESH >= 1).
 // -----------------------------------------------------------------------------
 `timescale 1ns/1ps
 
@@ -18,6 +18,7 @@ module tb;
     parameter DEPTH     = 16;
     parameter AF_THRESH = 14;
     parameter AE_THRESH = 2;
+    parameter OUT_REG   = 0;   // 0: FWFT (latency 1), 1: output register (latency 2)
 
     function integer clog2;
         input integer value;
@@ -51,7 +52,8 @@ module tb;
         .DATA_W    (DATA_W),
         .DEPTH     (DEPTH),
         .AF_THRESH (AF_THRESH),
-        .AE_THRESH (AE_THRESH)
+        .AE_THRESH (AE_THRESH),
+        .OUT_REG   (OUT_REG)
     ) dut (
         .clk          (clk),
         .rst_n        (rst_n),
@@ -105,6 +107,7 @@ module tb;
     reg               s_xfer;
     reg               m_xfer;
     reg               hold_chk;
+    reg               lat_wait;
     reg  [DATA_W-1:0] hold_data;
     integer           s_xfers;
     integer           m_xfers;
@@ -115,6 +118,7 @@ module tb;
         s_xfer   = 1'b0;
         m_xfer   = 1'b0;
         hold_chk = 1'b0;
+        lat_wait = 1'b0;
         s_xfers  = 0;
         m_xfers  = 0;
         wr_n     = 0;
@@ -131,6 +135,7 @@ module tb;
             m_ovf    = 1'b0;
             m_unf    = 1'b0;
             hold_chk = 1'b0;
+            lat_wait = 1'b0;
             s_xfer   = 1'b0;
             m_xfer   = 1'b0;
             started  = 1'b1;
@@ -139,13 +144,23 @@ module tb;
 
             if (count !== occ)                     fail("count mismatch");
             if (s_ready !== (occ != DEPTH))        fail("s_ready mismatch (full)");
-            if (m_valid !== (occ != 0))            fail("m_valid mismatch (empty)");
+            if (OUT_REG == 0) begin
+                // FWFT: m_valid is exactly 'not empty'
+                if (m_valid !== (occ != 0))        fail("m_valid mismatch (empty)");
+            end else begin
+                // output register: read latency is 2, so m_valid may lag by 1 cycle
+                if (m_valid !== 1'b0 && m_valid !== 1'b1) fail("m_valid is X");
+                if (m_valid === 1'b1 && occ == 0)  fail("m_valid high while empty");
+                if (occ >= 2 && m_valid !== 1'b1)  fail("m_valid low with 2+ words held");
+                if (lat_wait && m_valid !== 1'b1)  fail("read latency exceeded 2 cycles");
+                lat_wait = (occ != 0) && (m_valid !== 1'b1);
+            end
             if (almost_full !== (occ >= AF_THRESH))  fail("almost_full mismatch");
             if (almost_empty !== (occ <= AE_THRESH)) fail("almost_empty mismatch");
             if (overflow !== m_ovf)                fail("overflow flag mismatch");
             if (underflow !== m_unf)               fail("underflow flag mismatch");
 
-            if (occ != 0) begin
+            if (m_valid === 1'b1) begin
                 if (m_data !== exp_mem[rd_n % 65536])
                     fail("m_data mismatch (loss/dup/reorder)");
             end
@@ -157,7 +172,7 @@ module tb;
 
             // model update
             s_xfer = s_valid && (occ != DEPTH);
-            m_xfer = m_ready && (occ != 0);
+            m_xfer = m_ready && (m_valid === 1'b1);
             hold_chk  = m_valid && !m_ready;
             hold_data = m_data;
 
@@ -176,7 +191,7 @@ module tb;
                 m_unf = 1'b0;
             end
             if (s_valid && occ == DEPTH) m_ovf = 1'b1;
-            if (m_ready && occ == 0)     m_unf = 1'b1;
+            if (m_ready && (m_valid !== 1'b1)) m_unf = 1'b1;
         end
     end
 
@@ -272,8 +287,14 @@ module tb;
         s_xfers = 0;
         m_xfers = 0;
         run(300);
-        if (s_xfers != 300) fail("T6: write throughput below 100%");
-        if (m_xfers != 300) fail("T6: read throughput below 100%");
+        // OUT_REG=1 needs 2 <= occupancy <= DEPTH-1 to sustain 100%, so it
+        // cannot at DEPTH=2 (documented limitation, see decision log D13)
+        if (OUT_REG == 0 || DEPTH >= 3) begin
+            if (s_xfers != 300) fail("T6: write throughput below 100%");
+            if (m_xfers != 300) fail("T6: read throughput below 100%");
+        end else begin
+            $display("NOTE: T6 throughput check skipped (OUT_REG=1, DEPTH=2): %0d/300 writes, %0d/300 reads", s_xfers, m_xfers);
+        end
 
         // stop recording waves here: keeps dump.vcd small for EPWave
         // (T7-T9 still run and are fully checked)
