@@ -70,3 +70,20 @@ DRAFT: rewrite each entry in your own words before submitting. Add entries as yo
 - **Alternatives:** waveform-only inspection; per-test hand-checked expectations.
 - **Why:** self-checking against an independent model catches loss, duplication and reordering without manual review.
 - **Practical note:** waveform dump limited to top-level and DUT signals and stopped after the directed tests (`$dumpoff`), because EPWave truncated the full dump.
+
+## D13. OUT_REG: registered output stage (core DEPTH-1 words plus one output register)
+- **Chosen:** `OUT_REG=1` adds a one-word output register. Core memory holds DEPTH-1 words, the output register is the DEPTH-th, so total storage stays DEPTH words. `m_valid`/`m_data` come straight from flops; read latency is 2 cycles. `OUT_REG=0` is unchanged.
+- **Alternatives:** keep both memory at DEPTH words plus a separate output register (one wasted word); a 2-entry skid buffer; making the register unconditional.
+- **Why:** removes the `rd_ptr` to DEPTH:1 mux path from the output, giving a real latency vs Fmax trade-off at no storage cost. The core never overflows: with the output register empty the core holds at most 1 word and is read in the same cycle.
+- **How:** one total `cnt` register drives `count`, full and the flags in both modes. Core-empty is `cnt == out_valid`, so no second counter is needed. The core read enable is `~core_empty & (~out_valid | m_ready)`.
+- **Cost:** +1 cycle of latency. `m_ready` now feeds the core read enable combinationally, so the critical path moves from the output mux to `m_ready` to `core_rd_en`.
+
+## D14. OUT_REG=1 cannot sustain 100% throughput at DEPTH=2
+- **Found:** at DEPTH=2 with `OUT_REG=1` the throughput test got 200 of 300 transfers.
+- **Cause:** with a registered output, sustained 100% throughput needs occupancy of at least 2 (otherwise a one-cycle bubble appears), and the full-blocks-write rule (D6) needs occupancy of at most DEPTH-1. Both only hold for DEPTH >= 3.
+- **Alternatives:** allow a write when full if a read happens the same cycle (rejected in D6, adds a `m_ready` to `s_ready` path); add an input bypass (more logic and a longer path).
+- **Decision:** document the limit. Rule 1 asks for 100% only when not full or empty. The testbench skips only that one check for this one case and prints a NOTE. All data-integrity checks still run.
+
+## D15. How area numbers were measured
+- **Method:** Yosys generic synthesis (`synth -flatten`), DATA_W=32, DEPTH 16 and 64, OUT_REG 0 and 1. Counts are generic gate cells and flops, not FPGA LUTs.
+- **Limit:** generic gates have no timing, so Fmax was not measured. Critical paths in the write-up are identified by reasoning about the logic.
